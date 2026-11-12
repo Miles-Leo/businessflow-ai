@@ -15,6 +15,49 @@ Python 3.13、uv、FastAPI、LangChain、LangGraph、百炼 Qwen、MCP、Milvus�
 - 员工/负责人独立工作空间、自动核对任务进度、UTC+8 展示。
 - 受控飞书同步；结果未知时核对远端，不自动盲目重发。
 
+## 架构与执行边界
+
+```mermaid
+flowchart TD
+    Web[Vue 3 员工 / 负责人工作空间] --> API[FastAPI 会话与角色校验]
+    API --> Tasks[任务服务：状态 / 结构化结果 / 事件]
+    Tasks --> Workflow[LangGraph 意图解析与条件路由]
+    Workflow --> Agent[只读查询 Agent]
+    Agent --> MCP[MCP stdio 订单工具]
+    MCP --> Business[(SQLite 业务数据库)]
+    Agent --> Policy[政策检索]
+    Workflow --> Proposal[条件建议：查询事实与 Python 发货评估]
+    Proposal --> Business
+    Proposal --> Policy
+    Policy --> Embedding[Embedding 查询向量]
+    Embedding --> Milvus[(Milvus 生效政策版本)]
+    Milvus --> Related[同版本关联条款补齐]
+    Related --> Policy
+    Proposal --> Review[独立审核图：interrupt / resume]
+    Review --> Checkpoints[(SQLite Checkpointer)]
+    API --> Execute[负责人显式执行：重新校验订单]
+    Execute --> Business
+    API --> Sync[受控飞书同步 / 未知结果核对]
+    Sync --> Feishu[飞书多维表格]
+    API --> Refresh[所有者刷新：核对审核与工单事实]
+    Refresh --> Tasks
+    Refresh --> Checkpoints
+    Refresh --> Business
+```
+
+**模型理解需求，Python 校验业务条件，负责人批准，受控服务执行。** 普通查询 Agent 的订单工具通过 MCP；条件建议分支直接复用订单查询与评估函数。正式工单和飞书写入不作为任意写工具交给模型。
+
+### 条件建议的一次请求
+
+1. 模型提取意图与订单编号，Python 路由到条件建议分支。
+2. 查询订单，以实际发货时间、承诺时间和服务端查询时刻确定是否超期未发货。
+3. 符合条件后检索政策，检查处理建议与审核边界条款，分别保存事实、评估、来源和建议；不符合条件则返回查询结果，不启动审核。
+4. 通过 `interrupt()` 暂停独立审核图，由 SQLite Checkpointer 持久化；负责人提交决定后使用同一 `thread_id` 和 `Command(resume=...)` 恢复。
+5. 批准后仍需显式执行，重新检查当前订单；同一审核重复执行复用原工单，不同审核也不能重复创建同类活跃工单。
+6. 员工页面自动核对进度，保留原查询事实；刷新不执行工单，也不自动同步飞书。
+
+申请防重覆盖当前单进程任务和审核 API，工单执行由 SQLite 写事务与约束保护。飞书请求超时不等于写入失败，结果未知时先核对远端；不宣称跨系统绝对一次执行。
+
 ## 本地启动
 
 需要 Python 3.13、uv、Node/npm，以及独立部署的 Milvus Standalone。Milvus、etcd 和 MinIO 应运行并健康；本仓库不包含现有 Docker 数据或凭证。
